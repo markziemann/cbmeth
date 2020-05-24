@@ -1,0 +1,227 @@
+---
+title: "CB methylation analysis"
+author: "https://github.com/markziemann/cbmeth"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+theme: cosmo
+---
+
+## Introduction
+
+On the 18th May, Chiara shared some Illumina Epic methylation array data on the Deakin sharepoint which I
+transferred to my Nectar Webserver. There were 16 samples. The sample metadata was provided in the "Groups.csv"
+file which outlined the two contrats to be carried out.
+
+My general approach here is to use the MissMethyl package ([Phipson et al, 2016](https://pubmed.ncbi.nlm.nih.gov/26424855/))
+to import, normalise, filter and then limma to perform differential methylation analysis
+([Ritchie et al, 2015](https://pubmed.ncbi.nlm.nih.gov/25605792/)).
+
+```{r,libs}
+suppressPackageStartupMessages({
+    library("R.utils")
+    library("missMethyl")
+    library("limma")
+    library("minfi")
+    library("IlluminaHumanMethylationEPICmanifest")
+    library("RColorBrewer")
+    library("IlluminaHumanMethylationEPICanno.ilm10b4.hg19")
+    library("eulerr")
+    library("plyr")
+    library("gplots")
+    library("reshape2")
+    library("beeswarm")
+})
+# need some annotations
+annEPIC <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+myann <- data.frame(annEPIC[,c("UCSC_RefGene_Name","Regulatory_Feature_Group")])
+promoters <- grep("Prom",myann$Regulatory_Feature_Group)
+```
+
+## Import dataset
+
+```{r,import}
+baseDir <- "ILMLEPIC-15799"
+targets <- read.metharray.sheet(baseDir)
+head(targets)
+rgSet <- read.metharray.exp(targets = targets)
+rgSet
+```
+
+## Define sample sheet
+
+```{r,samplesheet}
+mygroups <- read.csv("Groups.csv")
+samplesheet <- mygroups[,9:11]
+colnames(samplesheet)[1] <- "Sample_Name"
+
+# define control and trt groups for contrast 1
+ctrl1_grp <- as.character(mygroups[,1])
+ctrl1_grp <- ctrl1_grp[which(ctrl1_grp != "")]
+ctrl1_grp
+samplesheet$ctrl1 <- as.numeric(samplesheet$Sample_Name %in% ctrl1_grp)
+trt1_grp <- as.character(mygroups[,2])
+trt1_grp <- trt1_grp[which(trt1_grp != "")]
+trt1_grp
+samplesheet$trt1 <- as.numeric(samplesheet$Sample_Name %in% trt1_grp)
+
+# define control and trt groups for contrast 2
+ctrl2_grp <- as.character(mygroups[,5])
+ctrl2_grp <- ctrl2_grp[which(ctrl2_grp != "")]
+ctrl2_grp
+samplesheet$ctrl2 <- as.numeric(samplesheet$Sample_Name %in% ctrl2_grp)
+trt2_grp <- as.character(mygroups[,6])
+trt2_grp <- trt2_grp[which(trt2_grp != "")]
+trt2_grp
+samplesheet$trt2 <- as.numeric(samplesheet$Sample_Name %in% trt2_grp)
+```
+
+## Normalisation and filtering 
+
+```{r,norm}
+mSet <- preprocessRaw(rgSet)
+mSetSw <- SWAN(mSet,verbose=FALSE)
+par(mfrow=c(1,2), cex=.7)
+densityByProbeType(mSet[,1], main = "Raw")
+densityByProbeType(mSetSw[,1], main = "SWAN")
+
+# filtering
+# include sex chromosomes
+detP <- detectionP(rgSet)
+keep <- rowSums(detP < 0.01) == ncol(rgSet)
+mSetSw <- mSetSw[keep,]
+# exclude sex chromosomes
+keep <- !(featureNames(mSetSw) %in% annEPIC$Name[annEPIC$chr %in% c("chrX","chrY")])
+mSetFlt <- mSetSw[keep,]
+
+# normalisation include sex chromosomes
+meth <- getMeth(mSetSw)
+unmeth <- getUnmeth(mSetSw)
+Mval <- log2((meth + 100)/(unmeth + 100))
+colnames(Mval) <- samplesheet$Sample_Name
+beta <- getBeta(mSetSw)
+dim(Mval)
+
+# normalisation exclude sex chromosomes
+meth <- getMeth(mSetFlt)
+unmeth <- getUnmeth(mSetFlt)
+Mval_flt <- log2((meth + 100)/(unmeth + 100))
+colnames(Mval_flt) <- samplesheet$Sample_Name
+beta_flt <- getBeta(mSetFlt)
+dim(Mval_flt)
+```
+
+## Multidimensional scaing analysis
+
+MDS analysis is one of the first things we do with the data so that we can understand the main sources
+of variation in the study. The LHS MDS plot show that the male samples are clustered to the right of the
+chart and the female ones to the left. If we exclude sex chromosomes as per the RHS chart, samples labeled
+"CT" are to the left/bottom of the chart and there doesn't appear to be any strong clustering of the other
+samples.
+
+```{r,mds}
+par(mfrow=c(1,2), cex=.7)
+colour_palette=brewer.pal(n = length(levels(targets$Sample_Group)), name = "Paired")
+colors <- colour_palette[as.integer(factor(targets$Sample_Group))]
+plotMDS(Mval, labels=targets$Sample_Name,col=colors,main="sex chromosomes included")
+legend("bottomright",legend=levels(factor(targets$Sample_Group)),pch=16,cex=1,col=colour_palette)
+plotMDS(Mval_flt, labels=targets$Sample_Name,col=colors,main="sex chromosomes excluded")
+```
+
+## Contrast 1
+
+For these contrasts, I am comparing `ctrl` to `trt1` samples, adjusting for sex and age. 
+This analysis was performed in parallel with and without exclusion of the sex chromosomes.
+Exclusion of sex chromosomes did not alter the results with respect to group comparison. 
+There was just one probe with differential methylation between groups (FDR<0.05).
+Probe cg02096172 had higher methylation in the trt1 group. The probe is situated in a
+site of DNase hypersensitivity and so could be important in gene regulation, but the probe
+not located close to any notable genes except a lncRNA gene RP3-429O6.1 (ENSG00000223342.2).
+There were no significant DMPs associated with age. There were 78 sex-associated sinificant 
+DMPs on autosomes.
+
+
+```{r,dm1}
+# DM analysis contrast 1 include sex chromosomes
+ss <- subset(samplesheet,ctrl1==1 | trt1==1)
+groups <- factor(ss$trt1)
+sex <- factor(ss$Gender,levels=c("M","F"))
+age <- ss$Age
+design <- model.matrix(~ age + sex + groups)
+mxs <- Mval[,which( colnames(Mval) %in% ss$Sample_Name )]
+fit.reduced <- lmFit(mxs,design)
+fit.reduced <- eBayes(fit.reduced)
+summary(decideTests(fit.reduced))
+dm1in <- topTable(fit.reduced,coef=4, number = Inf)
+dm1ina <- merge(myann,dm1in,by=0)
+dm1ina <- dm1ina[order(dm1ina$P.Value),]
+head(dm1ina)
+write.table(dm1ina,file="contrast1_incl.tsv",sep="\t",quote=F)
+
+# DM analysis contrast 1 excl sex chromosomes
+ss <- subset(samplesheet,ctrl1==1 | trt1==1)
+groups <- factor(ss$trt1)
+sex <- factor(ss$Gender,levels=c("M","F"))
+age <- ss$Age
+design <- model.matrix(~ age + sex + groups)
+mxs <- Mval_flt[,which( colnames(Mval_flt) %in% ss$Sample_Name )]
+fit.reduced <- lmFit(mxs,design)
+fit.reduced <- eBayes(fit.reduced)
+summary(decideTests(fit.reduced))
+dm1ex <- topTable(fit.reduced,coef=4, number = Inf)
+dm1exa <- merge(myann,dm1ex,by=0)
+dm1exa <- dm1exa[order(dm1exa$P.Value),]
+head(dm1exa)
+write.table(dm1exa,file="contrast1_excl.tsv",sep="\t",quote=F)
+```
+
+## Contrast 2
+
+In this contrast, there were no statistically significant DMPs between ctrl and trt groups. Fifty
+two significant autosomal DMPs were associated with sex; none with age.
+
+```{r,dm2}
+# DM analysis contrast 2 include sex chromosomes
+ss <- subset(samplesheet,ctrl2==1 | trt2==1)
+groups <- factor(ss$trt2)
+sex <- factor(ss$Gender,levels=c("M","F"))
+age <- ss$Age
+design <- model.matrix(~ age + sex + groups)
+mxs <- Mval[,which( colnames(Mval) %in% ss$Sample_Name )]
+fit.reduced <- lmFit(mxs,design)
+fit.reduced <- eBayes(fit.reduced)
+summary(decideTests(fit.reduced))
+dm2in <- topTable(fit.reduced,coef=4, number = Inf)
+dm2ina <- merge(myann,dm2in,by=0)
+dm2ina <- dm2ina[order(dm2ina$P.Value),]
+head(dm2ina)
+write.table(dm2ina,file="contrast2_incl.tsv",sep="\t",quote=F)
+
+# DM analysis contrast 2 excl sex chromosomes
+ss <- subset(samplesheet,ctrl2==1 | trt2==1)
+groups <- factor(ss$trt2)
+sex <- factor(ss$Gender,levels=c("M","F"))
+age <- ss$Age
+design <- model.matrix(~ age + sex + groups)
+mxs <- Mval_flt[,which( colnames(Mval_flt) %in% ss$Sample_Name )]
+fit.reduced <- lmFit(mxs,design)
+fit.reduced <- eBayes(fit.reduced)
+summary(decideTests(fit.reduced))
+dm2ex <- topTable(fit.reduced,coef=4, number = Inf)
+dm2exa <- merge(myann,dm2ex,by=0)
+dm2exa <- dm2exa[order(dm2exa$P.Value),]
+head(dm2exa)
+write.table(dm2exa,file="contrast2_excl.tsv",sep="\t",quote=F)
+```
+
+## Potential downstream work
+
+There are a lot of follow-up analyses and visualisations that are possible like heatmaps, volcano charts, beeswarm charts, 
+gene ontology and the like but it would be good have your opinion of this analysis first before we continue with that.
+
+## References
+
+Phipson B, Maksimovic J, Oshlack A. missMethyl: an R package for analyzing data from Illumina's HumanMethylation450 platform. Bioinformatics. 2016;32(2):286‐288. doi:10.1093/bioinformatics/btv560
+
+Ritchie ME, Phipson B, Wu D, et al. limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Res. 2015;43(7):e47. doi:10.1093/nar/gkv007
