@@ -12,7 +12,12 @@ theme: cosmo
 
 On the 18th May, Chiara shared some Illumina Epic methylation array data on the Deakin sharepoint which I
 transferred to my Nectar Webserver. There were 16 samples. The sample metadata was provided in the "Groups.csv"
-file which outlined the two contrats to be carried out.
+file which outlined the two contrasts to be carried out.
+On the 18th Aug Chiara provided a 3rd contrast:
+
+* Group 1: BD001, BD004, BD005, BD009, BD013,BD014
+
+* Group 2: BD002, BD003, BD007, BD008, BD010, BD012
 
 My general approach here is to use the MissMethyl package ([Phipson et al, 2016](https://pubmed.ncbi.nlm.nih.gov/26424855/))
 to import, normalise, filter and then limma to perform differential methylation analysis
@@ -75,6 +80,8 @@ trt2_grp <- as.character(mygroups[,6])
 trt2_grp <- trt2_grp[which(trt2_grp != "")]
 trt2_grp
 samplesheet$trt2 <- as.numeric(samplesheet$Sample_Name %in% trt2_grp)
+
+samplesheet
 ```
 
 ## Normalisation and filtering 
@@ -213,6 +220,53 @@ dm2exa <- merge(myann,dm2ex,by=0)
 dm2exa <- dm2exa[order(dm2exa$P.Value),]
 head(dm2exa)
 write.table(dm2exa,file="contrast2_excl.tsv",sep="\t",quote=F)
+```
+
+## Contrast 3
+
+In this contrast, Group 1 consists of BD001, BD004, BD005, BD009, BD013 and BD014 while group2 consists of BD002, BD003, BD007, BD008, BD010 and BD012
+
+There were no statistically significant DMPs between ctrl and trt groups.
+
+```{r,dm3}
+
+# DM analysis contrast 3 include sex chromosomes
+g1 <- c("BD001","BD004","BD009","BD013","BD014")
+g2 <- c("BD002","BD003","BD007","BD008","BD010","BD012")
+
+samplesheet$ctrl3 <- as.numeric(samplesheet$Sample_Name %in% g1)
+samplesheet$trt3 <- as.numeric(samplesheet$Sample_Name %in% g2)
+
+ss <- subset(samplesheet,ctrl3==1 | trt3==1)
+groups <- factor(ss$trt3)
+sex <- factor(ss$Gender,levels=c("M","F"))
+age <- ss$Age
+design <- model.matrix(~ age + sex + groups)
+mxs <- Mval[,which( colnames(Mval) %in% ss$Sample_Name )]
+fit.reduced <- lmFit(mxs,design)
+fit.reduced <- eBayes(fit.reduced)
+summary(decideTests(fit.reduced))
+dm3in <- topTable(fit.reduced,coef=4, number = Inf)
+dm3ina <- merge(myann,dm3in,by=0)
+dm3ina <- dm3ina[order(dm3ina$P.Value),]
+head(dm3ina)
+write.table(dm3ina,file="contrast3_incl.tsv",sep="\t",quote=F)
+
+# DM analysis contrast 3 excl sex chromosomes
+ss <- subset(samplesheet,ctrl3==1 | trt3==1)
+groups <- factor(ss$trt3)
+sex <- factor(ss$Gender,levels=c("M","F"))
+age <- ss$Age
+design <- model.matrix(~ age + sex + groups)
+mxs <- Mval_flt[,which( colnames(Mval_flt) %in% ss$Sample_Name )]
+fit.reduced <- lmFit(mxs,design)
+fit.reduced <- eBayes(fit.reduced)
+summary(decideTests(fit.reduced))
+dm3ex <- topTable(fit.reduced,coef=4, number = Inf)
+dm3exa <- merge(myann,dm3ex,by=0)
+dm3exa <- dm3exa[order(dm3exa$P.Value),]
+head(dm3exa)
+write.table(dm3exa,file="contrast3_excl.tsv",sep="\t",quote=F)
 ```
 
 ## Potential downstream work
